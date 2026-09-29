@@ -1,0 +1,13 @@
+const fs=require('fs');
+const M=require('../src/main.js');
+const p=Object.create(M.prototype);
+const SP=process.argv[2];
+const raw=fs.readFileSync(SP+'/raw.f32');
+const samples=new Float32Array(raw.buffer,raw.byteOffset,raw.length/4);
+const copy=new Float32Array(samples);
+p.normalise(copy);
+fs.writeFileSync(SP+'/js-norm.wav', p.encodeWav(copy,16000));
+fs.writeFileSync(SP+'/js-plain.wav', p.encodeWav(samples,16000));
+const rms=a=>Math.sqrt(a.reduce((s,v)=>s+v*v,0)/a.length);
+const peak=a=>a.reduce((m,v)=>Math.max(m,Math.abs(v)),0);
+console.log(`source RMS ${rms(samples).toFixed(4)} peak ${peak(samples).toFixed(3)}  ->  normalised RMS ${rms(copy).toFixed(4)} peak ${peak(copy).toFixed(3)}`);

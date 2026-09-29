@@ -1,0 +1,13 @@
+{
+  "name": "obsidian-lecture-transcriber",
+  "version": "2.0.0",
+  "description": "Local lecture transcription and summarising for Obsidian",
+  "main": "src/main.js",
+  "scripts": {
+    "test": "node test/run-all.js",
+    "build": "node scripts/build.js",
+    "install-local": "node scripts/build.js --install"
+  },
+  "license": "MIT",
+  "private": true
+}

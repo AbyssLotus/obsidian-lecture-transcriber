@@ -1,0 +1,13 @@
+.lt-modal-list { max-height: 340px; overflow-y: auto; margin: 12px 0; border: 1px solid var(--background-modifier-border); border-radius: 6px; }
+.lt-row { display: flex; align-items: center; gap: 10px; padding: 7px 10px; border-bottom: 1px solid var(--background-modifier-border); font-size: var(--font-ui-small); }
+.lt-row:last-child { border-bottom: none; }
+.lt-row-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lt-row-state { flex-shrink: 0; color: var(--text-muted); font-variant-numeric: tabular-nums; }
+.lt-row.is-done .lt-row-state { color: var(--text-success); }
+.lt-row.is-failed .lt-row-state { color: var(--text-error); }
+.lt-row.is-active { background: var(--background-modifier-hover); }
+.lt-row.is-active .lt-row-state { color: var(--text-accent); }
+.lt-bar { height: 4px; background: var(--background-modifier-border); border-radius: 2px; overflow: hidden; margin-top: 10px; }
+.lt-bar-fill { height: 100%; background: var(--interactive-accent); width: 0%; transition: width .25s ease; }
+.lt-summary { margin-top: 10px; color: var(--text-muted); font-size: var(--font-ui-small); }
+.lt-buttons { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; }
