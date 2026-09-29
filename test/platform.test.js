@@ -57,8 +57,16 @@ console.log('\n--- wake lock uses the right mechanism ---');
   const winOff=probe('win32',false);
   ok('Windows uses system-only flag when screen may sleep', winOff.args.join(' ').includes('0x80000001'));
 
+  // Linux depends on the machine: systemd-inhibit exists on most desktops and
+  // on CI runners, and is absent elsewhere. Both outcomes are correct — what
+  // must not happen is claiming a lock that was never taken.
   const lin=probe('linux',true);
-  ok('Linux returns null when systemd-inhibit is absent', lin===null, lin&&lin.cmd);
+  if (lin===null) {
+    ok('Linux reports no mechanism rather than pretending', true);
+  } else {
+    ok('Linux uses systemd-inhibit when present', lin.cmd.includes('systemd-inhibit'), lin.cmd);
+    ok('Linux inhibits idle and sleep', lin.args.join(' ').includes('idle:sleep'), lin.args.join(' '));
+  }
 }
 
 console.log('\n--- WAV encoding is a real, valid file ---');
