@@ -48,7 +48,7 @@ console.log('\n--- transcript body escaping is conditional ---');
     const audio=new TFile('Voice/L.m4a'), note=new TFile('M/W1.md'); notes.set(note.path,'Notes.\n');
     p.app={metadataCache:{resolvedLinks:{'M/W1.md':{'Voice/L.m4a':1}}},
       vault:{getAbstractFileByPath:x=>x===note.path?note:null,read:async f=>notes.get(f.path),
-        modify:async(f,c)=>notes.set(f.path,c),create:async()=>{throw new Error('no');}}};
+        modify:async(f,c)=>notes.set(f.path,c),process:async(f,fn)=>{const v=fn(notes.get(f.path));notes.set(f.path,v);return v;},create:async()=>{throw new Error('no');}}};
     global.window={};
     await p.writeTranscript(audio,'price was $5 and $10',info); return notes.get(note.path); };
   ok('plain transcript escapes dollars', (await mkNote({})).includes('\\$5'));

@@ -11,3 +11,18 @@
 .lt-bar-fill { height: 100%; background: var(--interactive-accent); width: 0%; transition: width .25s ease; }
 .lt-summary { margin-top: 10px; color: var(--text-muted); font-size: var(--font-ui-small); }
 .lt-buttons { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; }
+
+/* State colours live here rather than being assigned in JS, per the plugin
+   guidelines. */
+.lt-state-muted  { color: var(--text-muted); }
+.lt-state-ok     { color: var(--text-success); }
+.lt-state-bad    { color: var(--text-error); }
+
+/* Text inputs in the settings tab. */
+.lt-input-wide   { width: 100%; }
+.lt-input-path   { width: 320px; }
+.lt-input-url    { width: 260px; }
+
+/* The progress bar is driven by a CSS variable the code sets, so the only
+   thing JS touches is a value, not a style declaration. */
+.lt-bar-fill { width: var(--lt-progress, 0%); }

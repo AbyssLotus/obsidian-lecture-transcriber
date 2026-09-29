@@ -16,4 +16,5 @@ async function requestUrl(o){
   return {status:r.status,text,json};
 }
 requestUrl.__set=(r)=>{__resp=r;};
-module.exports = { Plugin, PluginSettingTab, Setting, Notice, Modal, TFile, requestUrl };
+function normalizePath(p){ return String(p).replace(/\\/g,'/').replace(/\/+/g,'/').replace(/^\/+|\/+$/g,''); }
+module.exports = { Plugin, PluginSettingTab, Setting, Notice, Modal, TFile, normalizePath, requestUrl };

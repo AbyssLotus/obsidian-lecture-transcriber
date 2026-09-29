@@ -17,9 +17,10 @@ const audio=new TFile('Voice/Class.m4a'), note=new TFile('Math-116/Week 1 Class 
 notes.set(note.path,'Piecewise functions!!\n');
 p.app={ metadataCache:{resolvedLinks:{'Math-116/Week 1 Class 3.md':{'Voice/Class.m4a':1}},getFileCache:()=>null},
   vault:{ adapter:{readBinary:async()=>fs.readFileSync(process.env.TEST_AUDIO).buffer},
+    readBinary:async()=>fs.readFileSync(process.env.TEST_AUDIO).buffer,
     getAbstractFileByPath:x=>x===note.path?note:(x===audio.path?audio:null),
     getFiles:()=>[note,audio], read:async f=>notes.get(f.path), cachedRead:async f=>notes.get(f.path),
-    modify:async(f,c)=>notes.set(f.path,c), create:async(x,c)=>{const f=new TFile(x);notes.set(x,c);return f;} } };
+    modify:async(f,c)=>notes.set(f.path,c), process:async(f,fn)=>{const v=fn(notes.get(f.path));notes.set(f.path,v);return v;}, create:async(x,c)=>{const f=new TFile(x);notes.set(x,c);return f;} } };
 global.window={};
 (async()=>{
   const t0=Date.now();

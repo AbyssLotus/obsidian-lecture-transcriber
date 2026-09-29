@@ -1,6 +1,6 @@
 'use strict';
 
-const { Plugin, PluginSettingTab, Setting, Notice, Modal, TFile } = require('obsidian');
+const { Plugin, PluginSettingTab, Setting, Notice, Modal, TFile, normalizePath } = require('obsidian');
 const { spawn } = require('child_process');
 const fs = require('fs');
 const http = require('http');
@@ -211,7 +211,8 @@ module.exports = class LectureTranscriber extends Plugin {
         if (!this.settings.autoTranscribeNew) return;
         if (!(f instanceof TFile) || !AUDIO_EXTS.includes(f.extension.toLowerCase())) return;
         // give iCloud/Obsidian a moment to finish writing the file
-        setTimeout(() => this.queueAuto(f), 4000);
+        // registered so it cannot fire after the plugin unloads
+        this.registerInterval(window.setTimeout(() => this.queueAuto(f), 4000));
       }));
     });
   }
@@ -397,7 +398,7 @@ module.exports = class LectureTranscriber extends Plugin {
       }
     }
     const dir = audio.parent && audio.parent.path !== '/' ? audio.parent.path + '/' : '';
-    const sib = `${dir}${audio.basename}.md`;
+    const sib = normalizePath(`${dir}${audio.basename}.md`);
     const existing = this.app.vault.getAbstractFileByPath(sib);
     return { file: existing instanceof TFile ? existing : null, path: sib };
   }
@@ -595,7 +596,7 @@ module.exports = class LectureTranscriber extends Plugin {
         const t = this.targetNoteFor(audio);
         if (t.file) priorNotes = await this.app.vault.read(t.file);
       } catch (e) { /* no notes to prime with; not fatal */ }
-      const buf = await this.app.vault.adapter.readBinary(audio.path);
+      const buf = await this.app.vault.readBinary(audio);
 
       onProgress && onProgress('preparing audio', 0);
       let prepared = false;
@@ -1104,12 +1105,13 @@ module.exports = class LectureTranscriber extends Plugin {
     let note = file;
     if (!note) note = await this.app.vault.create(notePath, '');
 
-    const existing = await this.app.vault.read(note);
-    // drop any previous transcript for this same recording, then append
+    // drop any previous transcript for this same recording, then append.
+    // Vault.process is atomic, so a note being edited while a long lecture
+    // finishes transcribing does not lose either change.
     const esc = audio.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     const re = new RegExp('\\n*<!-- transcribed: ' + esc + ' -->[\\s\\S]*?(?=\\n<!-- transcribed: |$)');
-    const cleaned = existing.replace(re, '').replace(/\s+$/, '');
-    await this.app.vault.modify(note, cleaned + '\n' + blockText);
+    await this.app.vault.process(note, (existing) =>
+      existing.replace(re, '').replace(/\s+$/, '') + '\n' + blockText);
     return note.path;
   }
 
@@ -1277,7 +1279,7 @@ class SetupModal extends Modal {
 
   say(text, pct) {
     if (this.msg) this.msg.setText(text);
-    if (this.progress && typeof pct === 'number') this.progress.style.width = `${Math.round(pct)}%`;
+    if (this.progress && typeof pct === 'number') this.progress.style.setProperty('--lt-progress', `${Math.round(pct)}%`);
   }
 
   async install(btn) {
@@ -1473,7 +1475,7 @@ class RunnerModal extends Modal {
         state.setAttr('title', e.message);
         failed++;
       }
-      this.bar.style.width = `${Math.round(((i + 1) / this.todo.length) * 100)}%`;
+      this.bar.style.setProperty('--lt-progress', `${Math.round(((i + 1) / this.todo.length) * 100)}%`);
     }
 
     this.plugin.releaseAwake('transcribing');
@@ -1569,7 +1571,7 @@ class TranscriberSettingTab extends PluginSettingTab {
          .setValue(this.plugin.settings.corrections)
          .onChange(async v => { this.plugin.settings.corrections = v; await this.plugin.saveSettings(); });
         t.inputEl.rows = 5;
-        t.inputEl.style.width = '100%';
+        t.inputEl.addClass('lt-input-wide');
       });
 
     new Setting(containerEl)
@@ -1587,7 +1589,7 @@ class TranscriberSettingTab extends PluginSettingTab {
          .setValue(this.plugin.settings.vocabulary)
          .onChange(async v => { this.plugin.settings.vocabulary = v; await this.plugin.saveSettings(); });
         t.inputEl.rows = 3;
-        t.inputEl.style.width = '100%';
+        t.inputEl.addClass('lt-input-wide');
       });
 
     new Setting(containerEl)
@@ -1670,7 +1672,7 @@ class TranscriberSettingTab extends PluginSettingTab {
         t.setPlaceholder('Call out due dates and anything described as exam material.')
          .setValue(this.plugin.settings.summaryExtra)
          .onChange(async v => { this.plugin.settings.summaryExtra = v; await this.plugin.saveSettings(); });
-        t.inputEl.rows = 2; t.inputEl.style.width = '100%';
+        t.inputEl.rows = 2; t.inputEl.addClass('lt-input-wide');
       });
 
     new Setting(containerEl)
@@ -1720,7 +1722,8 @@ class TranscriberSettingTab extends PluginSettingTab {
       .setDesc('Sends a short request and reports what happens, so you can check it without transcribing a lecture.');
     const result = test.controlEl.createSpan({ cls: 'lt-row-state' });
     test.addButton(b => b.setButtonText('Test').onClick(async () => {
-      result.setText(' running…'); result.style.color = 'var(--text-muted)';
+      result.setText(' running…');
+      result.className = 'lt-row-state lt-state-muted';
       const t0 = Date.now();
       try {
         const r = await this.plugin.summarise(
@@ -1728,10 +1731,10 @@ class TranscriberSettingTab extends PluginSettingTab {
           'We also went over the domain and range of simple functions.', null);
         const secs = ((Date.now() - t0) / 1000).toFixed(0);
         result.setText(` ✓ worked in ${secs}s — "${(r.title || 'untitled').slice(0, 40)}"`);
-        result.style.color = 'var(--text-success)';
+        result.className = 'lt-row-state lt-state-ok';
       } catch (e) {
         result.setText(` ✗ ${e.message}`);
-        result.style.color = 'var(--text-error)';
+        result.className = 'lt-row-state lt-state-bad';
       }
     }));
 
@@ -1739,7 +1742,7 @@ class TranscriberSettingTab extends PluginSettingTab {
       .setName('Ollama address')
       .addText(t => { t.setValue(this.plugin.settings.ollamaUrl)
         .onChange(async v => { this.plugin.settings.ollamaUrl = v.trim() || 'http://localhost:11434'; await this.plugin.saveSettings(); });
-        t.inputEl.style.width = '260px'; });
+        t.inputEl.addClass('lt-input-url'); });
 
     new Setting(containerEl).setName('Paths').setHeading();
 
@@ -1751,16 +1754,16 @@ class TranscriberSettingTab extends PluginSettingTab {
           this.plugin.settings[key] = v.trim(); await this.plugin.saveSettings();
           mark();
         });
-        t.inputEl.style.width = '320px';
+        t.inputEl.addClass('lt-input-path');
       });
       const status = s.controlEl.createSpan({ cls: 'lt-row-state' });
       const optional = key === 'ffmpegPath';
       const mark = () => {
         const v = this.plugin.settings[key];
         const ok = !!v && fs.existsSync(v);
-        if (ok) { status.setText(' ✓'); status.style.color = 'var(--text-success)'; return; }
+        if (ok) { status.setText(' ✓'); status.className = 'lt-row-state lt-state-ok'; return; }
         status.setText(optional ? ' not installed (fine)' : ' ✗ not found');
-        status.style.color = optional ? 'var(--text-muted)' : 'var(--text-error)';
+        status.className = 'lt-row-state ' + (optional ? 'lt-state-muted' : 'lt-state-bad');
       };
       mark();
     };

@@ -97,7 +97,7 @@ console.log('\n--- note layout ---');
   notes.set(note.path,'My typed notes.\n');
   p.app={metadataCache:{resolvedLinks:{'PSY/Week1.md':{'Voice/L.m4a':1}}},
     vault:{getAbstractFileByPath:x=>x===note.path?note:null,read:async f=>notes.get(f.path),
-      modify:async(f,c)=>notes.set(f.path,c),create:async()=>{throw new Error('should not create');}}};
+      modify:async(f,c)=>notes.set(f.path,c),process:async(f,fn)=>{const v=fn(notes.get(f.path));notes.set(f.path,v);return v;},create:async()=>{throw new Error('should not create');}}};
   global.window={};
   await p.writeTranscript(audio,'RAW TEXT.',{digest:{title:'Cognitive Revolution',summary:'It covered X.',points:['One','Two']}});
   const out=notes.get(note.path);
@@ -116,7 +116,7 @@ console.log('\n--- a failed summary must not cost the transcript ---');
   notes.set(note.path,'Notes.\n');
   p.app={metadataCache:{resolvedLinks:{'PSY/Week1.md':{'Voice/L.m4a':1}}},
     vault:{getAbstractFileByPath:x=>x===note.path?note:null,read:async f=>notes.get(f.path),
-      modify:async(f,c)=>notes.set(f.path,c),create:async()=>{throw new Error('no');}}};
+      modify:async(f,c)=>notes.set(f.path,c),process:async(f,fn)=>{const v=fn(notes.get(f.path));notes.set(f.path,v);return v;},create:async()=>{throw new Error('no');}}};
   await p.writeTranscript(audio,'STILL HERE.',{digestError:'Ollama returned 404'});
   const out=notes.get(note.path);
   ok('transcript still written', out.includes('STILL HERE.'));
