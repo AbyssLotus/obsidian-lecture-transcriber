@@ -12,20 +12,39 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
-        with: { node-version: '20' }
+        with:
+          node-version: '20'
+          cache: npm
+      - run: npm ci
       # The suites run against a stub of the Obsidian API, so they exercise the
-      # platform logic on the real OS without needing Obsidian installed.
+      # platform-specific code on each real OS without needing Obsidian.
       - run: node test/run-all.js
 
   release:
     needs: test
     runs-on: ubuntu-latest
-    permissions: { contents: write }
+    permissions:
+      contents: write
+      id-token: write        # required to sign the provenance attestation
+      attestations: write
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
-        with: { node-version: '20' }
+        with:
+          node-version: '20'
+          cache: npm
+      - run: npm ci
       - run: node scripts/build.js
+
+      # Lets anyone verify the released files were built by this workflow from
+      # this commit, with `gh attestation verify`.
+      - uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: |
+            dist/main.js
+            dist/manifest.json
+            dist/styles.css
+
       - name: Publish release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

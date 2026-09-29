@@ -126,6 +126,58 @@ does not allow it. Leave the lid open.
 
 ---
 
+## What it accesses, and why
+
+Obsidian's directory flags this plugin for filesystem access and for running
+programs. Both are real and unavoidable: speech recognition is a separate
+program that reads and writes files. Here is the whole of it.
+
+**It has no third-party dependencies.** `package-lock.json` lists zero external
+packages, so the only code here is the code in this repository. `main.js` in
+each release is a byte-for-byte copy of `src/main.js` — `node scripts/build.js`
+prints the hashes, and releases carry a signed GitHub build-provenance
+attestation you can check:
+
+```bash
+gh attestation verify main.js --repo AbyssLotus/obsidian-lecture-transcriber
+```
+
+**Files it reads and writes**
+
+| Where | What |
+|---|---|
+| A fresh temp folder per recording | Writes the converted audio, reads the transcript back, deletes the folder afterwards |
+| Its own app-data folder | The Whisper program and models it downloaded for you |
+| Program locations on disk | Checks whether Whisper, ffmpeg and Homebrew exist |
+| Your vault | Only through Obsidian's own API, never directly |
+
+It never reads or writes vault files outside Obsidian's API, and it never
+touches files elsewhere on your computer.
+
+**Programs it runs**
+
+| Program | When |
+|---|---|
+| `whisper-cli` | To transcribe a recording |
+| `caffeinate` / `powershell` / `systemd-inhibit` | To keep the computer awake, per platform |
+| `tar` | To unpack the Whisper download during setup |
+| `ffmpeg` | Only if Obsidian cannot decode a particular file |
+| `brew` | Only on macOS, only when you press Install in the setup window |
+
+**Network requests**
+
+| Host | When |
+|---|---|
+| `localhost:11434` | Ollama, for summaries, on your own machine |
+| `github.com` | Downloading the Whisper program, only during setup |
+| `huggingface.co` | Downloading the speech model, only during setup |
+
+Nothing else is contacted. Your recordings, transcripts and notes are never sent
+anywhere — transcription and summarising both run locally, which is the reason
+the downloads are large.
+
+---
+
 ## What it does not do
 
 - **Mobile.** Desktop only. It runs real programs on your computer, which
