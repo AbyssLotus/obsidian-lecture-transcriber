@@ -24,7 +24,7 @@ Settings → Community plugins → Browse → search "Lecture Transcriber" → I
 ### Before then, with BRAT
 
 1. Install the **BRAT** plugin from Community plugins
-2. BRAT → Add beta plugin → `tripphinch/obsidian-lecture-transcriber`
+2. BRAT → Add beta plugin → `AbyssLotus/obsidian-lecture-transcriber`
 3. Enable **Lecture Transcriber** in Community plugins
 
 ### Manually
