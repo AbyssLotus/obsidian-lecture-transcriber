@@ -2,6 +2,19 @@
 const { execFileSync } = require('child_process');
 const fs = require('fs'), path = require('path');
 const dir = __dirname;
+const ROOT = path.join(dir, '..');
+
+// main.js does require('obsidian'), which only exists inside Obsidian. Tests
+// run against a committed stub, copied into node_modules so Node resolves it
+// from src/ the same way it would in the real app.
+(function installStub() {
+  const from = path.join(dir, 'stubs', 'obsidian');
+  const to = path.join(ROOT, 'node_modules', 'obsidian');
+  fs.mkdirSync(to, { recursive: true });
+  for (const f of fs.readdirSync(from)) {
+    fs.copyFileSync(path.join(from, f), path.join(to, f));
+  }
+})();
 const suites = fs.readdirSync(dir).filter(f => /^(test\d+|platform\.test)\.js$/.test(f)).sort();
 let total = 0, failed = 0;
 for (const s of suites) {

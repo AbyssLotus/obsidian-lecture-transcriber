@@ -71,11 +71,20 @@ console.log('\n--- WAV encoding is a real, valid file ---');
   ok('RIFF/WAVE header', buf.slice(0,4).toString()==='RIFF' && buf.slice(8,12).toString()==='WAVE');
   ok('declares 16 kHz mono 16-bit', buf.readUInt32LE(24)===16000 && buf.readUInt16LE(22)===1 && buf.readUInt16LE(34)===16);
   ok('length matches the samples', buf.length===44+n*2 && buf.readUInt32LE(40)===n*2);
-  const tmp=path.join(os.tmpdir(),'lt-wavtest.wav'); fs.writeFileSync(tmp,buf);
-  const out=require('child_process').spawnSync('/opt/homebrew/bin/ffprobe',
-    ['-v','error','-show_entries','stream=codec_name,sample_rate,channels','-of','default=nw=1',tmp],{encoding:'utf8'});
-  ok('ffprobe accepts it', /pcm_s16le/.test(out.stdout)&&/16000/.test(out.stdout)&&/channels=1/.test(out.stdout), out.stdout.replace(/\n/g,' '));
-  fs.unlinkSync(tmp);
+  // Cross-check with ffprobe where it happens to exist. CI runners for other
+  // platforms will not have it, and the header assertions above already cover
+  // the contract, so this is a bonus rather than a requirement.
+  const probe=['/opt/homebrew/bin/ffprobe','/usr/local/bin/ffprobe','/usr/bin/ffprobe','ffprobe']
+    .find(c=>{ try{ return require('child_process').spawnSync(c,['-version'],{stdio:'ignore'}).status===0; }catch(e){ return false; } });
+  if (probe) {
+    const tmp=path.join(os.tmpdir(),'lt-wavtest.wav'); fs.writeFileSync(tmp,buf);
+    const out=require('child_process').spawnSync(probe,
+      ['-v','error','-show_entries','stream=codec_name,sample_rate,channels','-of','default=nw=1',tmp],{encoding:'utf8'});
+    ok('ffprobe agrees it is 16k mono PCM', /pcm_s16le/.test(out.stdout)&&/16000/.test(out.stdout)&&/channels=1/.test(out.stdout), out.stdout.replace(/\n/g,' '));
+    fs.unlinkSync(tmp);
+  } else {
+    console.log('  SKIP  ffprobe cross-check (ffprobe not installed)');
+  }
 }
 
 console.log('\n--- normalisation ---');
