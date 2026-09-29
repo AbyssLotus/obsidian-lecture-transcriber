@@ -199,6 +199,7 @@ module.exports = class LectureTranscriber extends Plugin {
     this.app.workspace.onLayoutReady(() => {
       // First run, or a machine that has not been set up yet (a vault synced
       // from another computer arrives with settings but no binaries).
+      if (this.settings.summarize) this.adoptInstalledModel();
       if (this.preflight().length && !this.settings.setupDismissed) {
         this.settings.setupDismissed = true;
         this.saveSettings();
@@ -809,6 +810,83 @@ module.exports = class LectureTranscriber extends Plugin {
     return out.replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
   }
 
+  // Is a server actually answering? Distinguishes "not installed" from
+  // "installed but not running", which need different advice.
+  async ollamaVersion() {
+    try {
+      const res = await this.nodeRequest('GET', `${this.settings.ollamaUrl.replace(/\/$/, '')}/api/version`, null);
+      this.activeReq = null;
+      if (res.status !== 200) return '';
+      return JSON.parse(res.body).version || 'unknown';
+    } catch (e) { return ''; }
+  }
+
+  /* Downloading a model is the one part of Ollama setup that can be automated,
+   * so it is: /api/pull streams newline-delimited progress. */
+  ollamaPull(model, onProgress) {
+    return new Promise((resolve, reject) => {
+      const url = new URL(`${this.settings.ollamaUrl.replace(/\/$/, '')}/api/pull`);
+      const lib = url.protocol === 'https:' ? https : http;
+      const data = Buffer.from(JSON.stringify({ model, stream: true }), 'utf8');
+      const req = lib.request({
+        hostname: url.hostname,
+        port: url.port || (url.protocol === 'https:' ? 443 : 80),
+        path: url.pathname, method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Content-Length': data.length },
+      }, (res) => {
+        let buf = '', failed = null;
+        res.setEncoding('utf8');
+        res.on('data', (chunk) => {
+          buf += chunk;
+          const lines = buf.split('\n');
+          buf = lines.pop();
+          for (const line of lines) {
+            if (!line.trim()) continue;
+            let j;
+            try { j = JSON.parse(line); } catch (e) { continue; }
+            if (j.error) { failed = j.error; continue; }
+            if (onProgress) onProgress(j.status || '', j.completed || 0, j.total || 0);
+          }
+        });
+        res.on('end', () => {
+          this.activeReq = null;
+          if (failed) reject(new Error(failed));
+          else if (res.statusCode !== 200) reject(new Error(`Ollama returned ${res.statusCode} while downloading ${model}`));
+          else resolve();
+        });
+      });
+      req.on('error', (e) => { this.activeReq = null; reject(new Error(`Could not reach Ollama — ${e.message}`)); });
+      req.setTimeout(90 * 60000, () => req.destroy(new Error('The download stalled')));
+      this.activeReq = req;
+      req.write(data);
+      req.end();
+    });
+  }
+
+  // If no summary model is chosen, or the chosen one is gone, adopt one that
+  // is actually installed rather than failing every summary.
+  async adoptInstalledModel() {
+    let list = [];
+    try {
+      const res = await this.nodeRequest('GET', `${this.settings.ollamaUrl.replace(/\/$/, '')}/api/tags`, null);
+      this.activeReq = null;
+      if (res.status !== 200) return false;
+      list = (JSON.parse(res.body).models || []).filter(m => m && m.name);
+    } catch (e) { return false; }
+    if (!list.length) return false;
+    if (this.settings.ollamaModel && list.some(m => m.name === this.settings.ollamaModel)) return true;
+
+    // Choose by size, not alphabetically. Very small models summarise poorly and
+    // very large ones are slow, so prefer the smallest above ~2 GB.
+    const withSize = list.map(m => ({ name: m.name, size: m.size || 0 }));
+    const sane = withSize.filter(m => m.size >= 2e9).sort((a, b) => a.size - b.size);
+    const pick = (sane[0] || withSize.sort((a, b) => b.size - a.size)[0]).name;
+
+    this.settings.ollamaModel = pick;
+    await this.saveSettings();
+    return true;
+  }
+
   async ollamaModels() {
     try {
       const res = await this.nodeRequest('GET', `${this.settings.ollamaUrl.replace(/\/$/, '')}/api/tags`, null);
@@ -1168,6 +1246,11 @@ const MODELS = {
   'ggml-large-v3-turbo-q5_0.bin': { mb: 574, label: 'Fast, less accurate (0.6 GB)' },
 };
 const MODEL_BASE = 'https://huggingface.co/ggerganov/whisper.cpp/resolve/main/';
+// Summary models, smallest first. Both are ordinary Ollama library tags.
+const SUMMARY_MODELS = [
+  { tag: 'qwen3:4b', label: 'qwen3:4b — about 2.6 GB, works on most machines' },
+  { tag: 'qwen3:8b', label: 'qwen3:8b — about 5.2 GB, better key points' },
+];
 const VAD_MODEL = 'ggml-silero-v5.1.2.bin';
 
 function downloadTo(url, dest, onProgress, redirects) {
@@ -1232,7 +1315,7 @@ class SetupModal extends Modal {
   constructor(app, plugin) { super(app); this.plugin = plugin; this.busy = false; }
 
   async onOpen() {
-    this.titleEl.setText('Set up Lecture Transcriber');
+    this.titleEl.setText('Set up Transcriber and Summary for Idiots');
     this.render();
   }
 
@@ -1250,6 +1333,9 @@ class SetupModal extends Modal {
     const c = this.contentEl;
     c.empty();
     const st = this.status();
+    // Asked once per render; the rows below are drawn from it.
+    this.ollama = { version: await this.plugin.ollamaVersion(), models: [] };
+    if (this.ollama.version) this.ollama.models = await this.plugin.ollamaModels();
 
     c.createEl('p', { text: 'Everything runs on this computer. Nothing is uploaded.' , cls: 'lt-summary' });
 
@@ -1263,6 +1349,33 @@ class SetupModal extends Modal {
     row('Speech model', st.model, `will download ${MODELS[path.basename(this.plugin.settings.modelPath)] ? MODELS[path.basename(this.plugin.settings.modelPath)].mb + ' MB' : ''}`);
     row('Silence detection model', st.vad, 'will download 1 MB');
 
+    // Summaries are optional, so this is reported separately and never blocks
+    // transcription.
+    const oll = this.ollama;
+    const hasModel = oll.models.length > 0;
+    row('Ollama (only needed for summaries)',
+        !!oll.version && hasModel,
+        !oll.version ? 'not running — optional' : (hasModel ? '' : 'no model yet'));
+
+    if (!oll.version) {
+      const help = c.createDiv({ cls: 'lt-summary' });
+      help.createSpan({ text: 'Transcripts work without Ollama. For summaries and key points, install it, open it once so it runs in the background, then reopen this window. ' });
+      help.createEl('a', { text: 'Get Ollama', href: 'https://ollama.com/download' });
+      const cmd = IS_MAC ? 'brew install --cask ollama' : (IS_WIN ? 'winget install Ollama.Ollama' : 'curl -fsSL https://ollama.com/install.sh | sh');
+      c.createEl('p', { text: `Or from a terminal:  ${cmd}`, cls: 'lt-summary' });
+    } else if (!hasModel) {
+      c.createEl('p', {
+        text: `Ollama ${oll.version} is running but has no model yet. Pick one and it will be downloaded for you:`,
+        cls: 'lt-summary',
+      });
+      const pickRow = c.createDiv({ cls: 'lt-buttons' });
+      for (const m of SUMMARY_MODELS) {
+        const b = pickRow.createEl('button', { text: `Download ${m.tag}` });
+        b.setAttr('title', m.label);
+        b.onclick = () => this.pullModel(m.tag, b);
+      }
+    }
+
     this.progress = c.createDiv({ cls: 'lt-bar' }).createDiv({ cls: 'lt-bar-fill' });
     this.msg = c.createDiv({ cls: 'lt-summary', text: '' });
 
@@ -1270,11 +1383,34 @@ class SetupModal extends Modal {
     buttons.createEl('button', { text: 'Close' }).onclick = () => this.close();
 
     if (st.whisper && st.model && st.vad) {
-      this.msg.setText('Everything is installed. You can close this and press the microphone in the sidebar.');
+      this.msg.setText(this.ollama.version && this.ollama.models.length
+        ? 'Everything is installed. Close this and press the microphone in the left sidebar.'
+        : 'Transcription is ready. Close this and press the microphone in the left sidebar. Summaries need the Ollama step above.');
       return;
     }
     const go = buttons.createEl('button', { text: 'Install what is missing', cls: 'mod-cta' });
     go.onclick = () => this.install(go);
+  }
+
+  async pullModel(tag, btn) {
+    if (this.busy) return;
+    this.busy = true;
+    btn.disabled = true;
+    try {
+      await this.plugin.ollamaPull(tag, (status, done, total) => {
+        const pct = total ? (done / total) * 100 : 0;
+        const mb = total ? ` — ${(done / 1e6).toFixed(0)} of ${(total / 1e6).toFixed(0)} MB` : '';
+        this.say(`${status}${mb}`, pct);
+      });
+      this.plugin.settings.ollamaModel = tag;
+      await this.plugin.saveSettings();
+      this.say(`${tag} installed. Summaries are on.`, 100);
+    } catch (e) {
+      this.say(`Could not download ${tag}: ${e.message}`);
+    } finally {
+      this.busy = false;
+      this.render();
+    }
   }
 
   say(text, pct) {
