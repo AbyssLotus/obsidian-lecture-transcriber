@@ -34,6 +34,7 @@ if gh repo view "$LOGIN/$REPO" >/dev/null 2>&1; then
   git branch -M main
   git push -u origin main --force-with-lease 2>/dev/null || git push -u origin main
 else
+  git branch -M main
   gh repo create "$REPO" --public --source=. --remote=origin \
     --description "Transcribe and summarise lecture recordings locally in Obsidian. Offline, no API keys." \
     --push
