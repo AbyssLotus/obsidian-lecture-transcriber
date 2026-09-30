@@ -1250,6 +1250,12 @@ const MODELS = {
   'ggml-large-v3-turbo-q5_0.bin': { mb: 574, label: 'Fast, less accurate (0.6 GB)' },
 };
 const MODEL_BASE = 'https://huggingface.co/ggerganov/whisper.cpp/resolve/main/';
+// The voice-activity model is published in a different repository from the
+// speech models, so the base URL cannot be shared. Getting this wrong 404s.
+const VAD_BASE = 'https://huggingface.co/ggml-org/whisper-vad/resolve/main/';
+function modelUrl(fileName) {
+  return (/silero/i.test(fileName) ? VAD_BASE : MODEL_BASE) + fileName;
+}
 // Summary models, smallest first. Both are ordinary Ollama library tags.
 const SUMMARY_MODELS = [
   { tag: 'qwen3:4b', label: 'qwen3:4b — about 2.6 GB, works on most machines' },
@@ -1551,8 +1557,16 @@ class SetupModal extends Modal {
     try {
       await this.ensureWhisper();
       await this.ensureModel(path.basename(this.plugin.settings.modelPath), 'modelPath');
-      await this.ensureModel(VAD_MODEL, 'vadModelPath');
+      // Optional: without it, silence is not skipped, which costs some speed
+      // and loop resistance but still transcribes correctly.
+      let vadNote = '';
+      try {
+        await this.ensureModel(VAD_MODEL, 'vadModelPath');
+      } catch (e) {
+        vadNote = ` Silence detection could not be installed (${e.message}), so it is off. Everything else works.`;
+      }
       await this.plugin.saveSettings();
+      if (vadNote) this.say(vadNote.trim());
       this.say('Done. Checking it works…', 100);
       const check = this.plugin.preflight();
       this.say(check.length ? `Still missing: ${check.join(', ')}` : 'Ready. Press the microphone in the left sidebar to transcribe.', 100);
@@ -1662,8 +1676,15 @@ class SetupModal extends Modal {
     if (fs.existsSync(dest)) { this.plugin.settings[settingKey] = dest; return; }
     const label = (MODELS[fileName] && MODELS[fileName].label) || fileName;
     this.say(`Downloading ${label}…`, 0);
-    await downloadTo(MODEL_BASE + fileName, dest,
-      (got, total) => this.say(`Downloading ${label} — ${(got / 1e6).toFixed(0)} MB`, total ? (got / total) * 100 : 0));
+    const url = modelUrl(fileName);
+    try {
+      await downloadTo(url, dest,
+        (got, total) => this.say(`Downloading ${label} — ${(got / 1e6).toFixed(0)}${total ? ' of ' + (total / 1e6).toFixed(0) : ''} MB`,
+                                 total ? (got / total) * 100 : 0));
+    } catch (e) {
+      try { fs.unlinkSync(dest + '.part'); } catch (e2) { /* nothing to clean */ }
+      throw new Error(`Could not download ${fileName}: ${e.message}. URL was ${url}`);
+    }
     this.plugin.settings[settingKey] = dest;
   }
 }
