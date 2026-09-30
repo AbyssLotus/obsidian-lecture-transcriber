@@ -69,6 +69,31 @@ console.log('\n--- wake lock uses the right mechanism ---');
   }
 }
 
+console.log('\n--- default model matches the compute available ---');
+{
+  // The prebuilt Windows/Linux whisper builds are CPU-only, where the accurate
+  // model is several times slower, so the default there must be the fast one.
+  const fs2=require('fs');
+  const code=fs2.readFileSync(require('path').join(__dirname,'..','src','main.js'),'utf8');
+  const line=code.split('\n').find(l=>l.includes("modelPath: path.join(MODEL_DIR"));
+  ok('the default is chosen per platform, not hardcoded', /IS_MAC \?/.test(line), line&&line.trim());
+
+  const defaultFor=(plat)=>{
+    const M=loadAs(plat,'x64',{LOCALAPPDATA:'C:\\x'});
+    const p=Object.create(M.prototype);
+    // resolveBinaries reads settings, so feed it the module's own defaults by
+    // invoking the same expression the module uses.
+    const path2=require('path'), os2=require('os');
+    const IS_MAC = plat==='darwin';
+    return IS_MAC ? 'ggml-large-v3-q5_0.bin' : 'ggml-large-v3-turbo-q5_0.bin';
+  };
+  // Assert against the module source rather than a copy of the rule.
+  const mac=/IS_MAC \? '([^']+)'/.exec(line);
+  const other=/: '([^']+)'/.exec(line);
+  ok('macOS default is the accurate model', mac && mac[1].includes('large-v3-q5'), mac&&mac[1]);
+  ok('Windows and Linux default to the fast model', other && other[1].includes('turbo'), other&&other[1]);
+}
+
 console.log('\n--- WAV encoding is a real, valid file ---');
 {
   const M=loadAs(process.platform);

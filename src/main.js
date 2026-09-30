@@ -6,6 +6,7 @@ const fs = require('fs');
 const http = require('http');
 const https = require('https');
 const os = require('os');
+const zlib = require('zlib');
 const path = require('path');
 
 const AUDIO_EXTS = ['m4a','mp3','wav','webm','mp4','aac','flac','ogg','opus','mov','m4v'];
@@ -63,7 +64,10 @@ const FFMPEG_NAMES = ['ffmpeg'];
 const DEFAULTS = {
   whisperPath: '',          // resolved on load, or set by the setup wizard
   ffmpegPath: '',           // optional: only used if Obsidian cannot decode a file
-  modelPath: path.join(MODEL_DIR, 'ggml-large-v3-q5_0.bin'),
+  // macOS gets GPU acceleration through Metal, so the accurate model is
+  // affordable. The prebuilt Windows and Linux builds are CPU-only, where the
+  // accurate model is several times slower, so default to the fast one there.
+  modelPath: path.join(MODEL_DIR, IS_MAC ? 'ggml-large-v3-q5_0.bin' : 'ggml-large-v3-turbo-q5_0.bin'),
   vadModelPath: path.join(MODEL_DIR, 'ggml-silero-v5.1.2.bin'),
   language: 'en',
   fastDecode: true,
@@ -1285,18 +1289,82 @@ function downloadTo(url, dest, onProgress, redirects) {
   });
 }
 
-// tar is present on Windows 10+, macOS and most Linux, and bsdtar reads zips.
-function extractArchive(file, destDir) {
+/* Zips are unpacked in JavaScript rather than by shelling out to tar. tar.exe
+ * exists on current Windows but is not guaranteed to be reachable, and relying
+ * on it made unpacking the most fragile step of setup. zlib is built into Node,
+ * so this needs nothing from the machine. */
+function unzip(file, destDir) {
+  const buf = fs.readFileSync(file);
+  if (buf.length < 4 || buf.readUInt32LE(0) !== 0x04034b50) {
+    throw new Error('The downloaded file is not a zip archive (the download may have been blocked or redirected)');
+  }
+
+  // End of central directory: scan back for its signature.
+  let eocd = -1;
+  for (let i = buf.length - 22; i >= 0 && i > buf.length - 66000; i--) {
+    if (buf.readUInt32LE(i) === 0x06054b50) { eocd = i; break; }
+  }
+  if (eocd < 0) throw new Error('The zip archive is damaged (no directory found)');
+
+  const count = buf.readUInt16LE(eocd + 10);
+  let p = buf.readUInt32LE(eocd + 16);
+  let written = 0;
+
+  for (let n = 0; n < count; n++) {
+    if (buf.readUInt32LE(p) !== 0x02014b50) break;
+    const method = buf.readUInt16LE(p + 10);
+    const compSize = buf.readUInt32LE(p + 20);
+    const nameLen = buf.readUInt16LE(p + 28);
+    const extraLen = buf.readUInt16LE(p + 30);
+    const commentLen = buf.readUInt16LE(p + 32);
+    const localOff = buf.readUInt32LE(p + 42);
+    const name = buf.slice(p + 46, p + 46 + nameLen).toString('utf8');
+    p += 46 + nameLen + extraLen + commentLen;
+
+    if (name.endsWith('/')) continue;
+    // Never let an archive write outside the destination.
+    const safe = path.normalize(name).replace(/^(\.\.[/\\])+/, '').replace(/^[/\\]+/, '');
+    const out = path.join(destDir, safe);
+    if (!path.resolve(out).startsWith(path.resolve(destDir))) continue;
+
+    const lnLen = buf.readUInt16LE(localOff + 26);
+    const lxLen = buf.readUInt16LE(localOff + 28);
+    const start = localOff + 30 + lnLen + lxLen;
+    const raw = buf.slice(start, start + compSize);
+
+    let data;
+    if (method === 0) data = raw;
+    else if (method === 8) data = zlib.inflateRawSync(raw);
+    else throw new Error(`The zip uses an unsupported compression method (${method})`);
+
+    fs.mkdirSync(path.dirname(out), { recursive: true });
+    fs.writeFileSync(out, data);
+    written++;
+  }
+  if (!written) throw new Error('The zip archive contained no files');
+}
+
+// .tar.gz (Linux builds) still goes through tar, which Linux always has.
+function untarGz(file, destDir) {
   return new Promise((resolve, reject) => {
-    fs.mkdirSync(destDir, { recursive: true });
-    const proc = spawn('tar', ['-xf', file, '-C', destDir], { stdio: 'ignore', windowsHide: true });
+    const proc = spawn('tar', ['-xzf', file, '-C', destDir], { stdio: 'ignore' });
     proc.on('error', () => reject(new Error('Could not run tar to unpack the download')));
     proc.on('close', (code) => code === 0 ? resolve() : reject(new Error(`Unpacking failed (tar exited ${code})`)));
   });
 }
 
+async function extractArchive(file, destDir) {
+  fs.mkdirSync(destDir, { recursive: true });
+  if (/\.zip$/i.test(file)) unzip(file, destDir);
+  else await untarGz(file, destDir);
+}
+
+/* The Windows archive contains whisper-cli.exe and also main.exe, which is the
+ * deprecated older CLI. Matching whichever the filesystem happened to list
+ * first could pick main.exe and then pass it flags built for whisper-cli, so
+ * candidates are collected and then chosen in WHISPER_NAMES order. */
 function findWhisperIn(dir) {
-  const wanted = WHISPER_NAMES.map(n => (n + EXE).toLowerCase());
+  const found = new Map();
   const stack = [dir];
   while (stack.length) {
     const cur = stack.pop();
@@ -1304,11 +1372,41 @@ function findWhisperIn(dir) {
     try { entries = fs.readdirSync(cur, { withFileTypes: true }); } catch (e) { continue; }
     for (const e of entries) {
       const full = path.join(cur, e.name);
-      if (e.isDirectory()) stack.push(full);
-      else if (wanted.includes(e.name.toLowerCase())) return full;
+      if (e.isDirectory()) { stack.push(full); continue; }
+      const base = e.name.toLowerCase();
+      for (const n of WHISPER_NAMES) {
+        if (base === (n + EXE).toLowerCase() && !found.has(n)) found.set(n, full);
+      }
     }
   }
+  for (const n of WHISPER_NAMES) if (found.has(n)) return found.get(n);
   return '';
+}
+
+/* Runs the program once so a broken or incompatible download is reported during
+ * setup, with the reason, instead of failing on the first real lecture with an
+ * exit code. Also catches a missing runtime DLL on Windows. */
+function verifyWhisper(bin) {
+  return new Promise((resolve) => {
+    let proc;
+    try {
+      proc = spawn(bin, ['--help'], { windowsHide: true });
+    } catch (e) {
+      resolve(`could not be started (${e.message})`);
+      return;
+    }
+    let out = '';
+    const done = (msg) => { try { proc.kill(); } catch (e) { /* gone */ } resolve(msg); };
+    proc.stdout.on('data', (d) => { out += d; });
+    proc.stderr.on('data', (d) => { out += d; });
+    proc.on('error', (e) => done(`could not be started (${e.message})`));
+    proc.on('close', () => {
+      // --help exits non-zero on some builds, so look for the usage text.
+      if (/usage|--model|-m FNAME/i.test(out)) resolve('');
+      else resolve(`ran but did not look like Whisper. Output was: ${out.slice(0, 200) || '(nothing)'}`);
+    });
+    setTimeout(() => done('did not respond'), 20000);
+  });
 }
 
 class SetupModal extends Modal {
@@ -1470,17 +1568,54 @@ class SetupModal extends Modal {
       throw new Error(`No prebuilt Whisper is published for ${key}. Build whisper.cpp yourself and set the path in settings.`);
     }
 
+    const url = WHISPER_RELEASE + asset;
     const archive = path.join(dataDir(), asset);
+
+    // Each stage names itself, because "setup failed" is useless to act on.
     this.say(`Downloading Whisper for ${key}…`, 0);
-    await downloadTo(WHISPER_RELEASE + asset, archive,
-      (got, total) => this.say(`Downloading Whisper… ${(got / 1e6).toFixed(0)} MB`, total ? (got / total) * 100 : 0));
+    let lastErr = null;
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      try {
+        await downloadTo(url, archive,
+          (got, total) => this.say(`Downloading Whisper… ${(got / 1e6).toFixed(0)}${total ? ' of ' + (total / 1e6).toFixed(0) : ''} MB`,
+                                   total ? (got / total) * 100 : 0));
+        lastErr = null;
+        break;
+      } catch (e) {
+        lastErr = e;
+        try { fs.unlinkSync(archive + '.part'); } catch (e2) { /* nothing to clean */ }
+        if (attempt === 1) this.say('Download failed, retrying once…', 0);
+      }
+    }
+    if (lastErr) {
+      throw new Error(`Download step failed: ${lastErr.message}. URL was ${url}. ` +
+        'If this keeps happening, a firewall, VPN or antivirus is usually blocking github.com; ' +
+        'you can also download that file in a browser and put it in ' + dataDir());
+    }
+
+    const size = (() => { try { return fs.statSync(archive).size; } catch (e) { return 0; } })();
+    if (size < 100000) {
+      throw new Error(`Download step produced only ${size} bytes, which is not the real file. Something between this computer and github.com replaced it.`);
+    }
+
     this.say('Unpacking…', 100);
-    await extractArchive(archive, BIN_DIR);
+    try {
+      await extractArchive(archive, BIN_DIR);
+    } catch (e) {
+      throw new Error(`Unpack step failed: ${e.message}. The archive is at ${archive} if you want to unzip it by hand into ${BIN_DIR}.`);
+    }
     try { fs.unlinkSync(archive); } catch (e) { /* leave it */ }
 
     const bin = findWhisperIn(BIN_DIR);
     if (!bin) throw new Error('Downloaded Whisper but could not find the program inside the archive');
     if (!IS_WIN) { try { fs.chmodSync(bin, 0o755); } catch (e) { /* best effort */ } }
+
+    this.say('Checking the download works…', 100);
+    const bad = await verifyWhisper(bin);
+    if (bad) {
+      throw new Error(`Whisper downloaded but ${bad}` +
+        (IS_WIN ? ' On Windows this is usually a missing Visual C++ runtime — install "Microsoft Visual C++ Redistributable (x64)" and press Install again.' : ''));
+    }
     s.whisperPath = bin;
   }
 
