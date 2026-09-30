@@ -87,6 +87,18 @@ Your computer is kept awake for the whole thing, including while recording.
 Open Settings → **Test the summary model** → *Test*. It tells you exactly what
 is wrong in one line. Usually: open the Ollama app, then press Test again.
 
+**Windows: "the program did not start" or "a required DLL is missing"** — the
+Whisper program needs Microsoft's C++ runtime, which many Windows installs do
+not have. Install **Microsoft Visual C++ Redistributable (x64)** from
+[aka.ms/vs/17/release/vc_redist.x64.exe](https://aka.ms/vs/17/release/vc_redist.x64.exe),
+restart Obsidian, then press Install again. This is the single most common
+Windows setup failure.
+
+**Windows: it downloads but will not run, and the runtime is already installed**
+— antivirus or Windows itself is usually blocking a newly downloaded program.
+Open the folder the error names, double-click `whisper-cli.exe` once, and allow
+it if Windows asks. Then press Install again.
+
 **Everything is slow** — Settings → **Summary model**: pick a smaller one.
 `qwen3:4b` is several times faster than a large model.
 

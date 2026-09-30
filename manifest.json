@@ -1,7 +1,7 @@
 {
   "id": "lecture-transcriber",
   "name": "Transcriber and Summary for Idiots",
-  "version": "2.2.0",
+  "version": "2.2.1",
   "minAppVersion": "1.4.0",
   "description": "Transcribe lecture recordings locally with Whisper and summarise them with a local model. Works offline; nothing is uploaded.",
   "author": "tripphinch",

@@ -15,7 +15,13 @@ const ROOT = path.join(dir, '..');
     fs.copyFileSync(path.join(from, f), path.join(to, f));
   }
 })();
-const suites = fs.readdirSync(dir).filter(f => /^(test\d+|platform\.test)\.js$/.test(f)).sort();
+// Any *.test.js, plus the numbered suites. Anything needing a real Whisper or
+// Ollama (e2e, repro, mkwav) is deliberately excluded — CI has neither.
+const MANUAL = new Set(['e2e.js', 'repro.js', 'mkwav.js', 'run-all.js']);
+const suites = fs.readdirSync(dir)
+  .filter(f => f.endsWith('.js') && !MANUAL.has(f))
+  .filter(f => /\.test\.js$/.test(f) || /^test\d+\.js$/.test(f))
+  .sort();
 let total = 0, failed = 0;
 for (const s of suites) {
   let out = '';

@@ -1386,27 +1386,54 @@ function findWhisperIn(dir) {
 /* Runs the program once so a broken or incompatible download is reported during
  * setup, with the reason, instead of failing on the first real lecture with an
  * exit code. Also catches a missing runtime DLL on Windows. */
+/* Windows exit codes that mean the program could not start at all. When this
+ * happens there is no output whatsoever, so the code is the only evidence. */
+const WIN_START_FAILURES = {
+  3221225781: 'a required DLL is missing',        // 0xC0000135 STATUS_DLL_NOT_FOUND
+  3221225595: 'a required DLL is the wrong version', // 0xC0000139 ENTRYPOINT_NOT_FOUND
+  3221225477: 'it crashed on startup',            // 0xC0000005 ACCESS_VIOLATION
+  3221226505: 'it was stopped on startup, usually by antivirus', // 0xC0000409
+};
+
+// Does this machine have the Microsoft C++ runtime that the Windows build needs?
+function missingMsvcRuntime() {
+  if (!IS_WIN) return false;
+  const sys = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32');
+  return !['vcruntime140.dll', 'msvcp140.dll'].every(d => fs.existsSync(path.join(sys, d)));
+}
+
+/* Runs the program once so a broken or unusable download is reported during
+ * setup, with the reason, instead of failing on the first real lecture. */
 function verifyWhisper(bin) {
-  return new Promise((resolve) => {
+  const attempt = (flag) => new Promise((resolve) => {
     let proc;
     try {
-      proc = spawn(bin, ['--help'], { windowsHide: true });
+      proc = spawn(bin, [flag], { windowsHide: true });
     } catch (e) {
-      resolve(`could not be started (${e.message})`);
+      resolve({ ok: false, why: `could not be started (${e.message})` });
       return;
     }
     let out = '';
-    const done = (msg) => { try { proc.kill(); } catch (e) { /* gone */ } resolve(msg); };
+    let settled = false;
+    const finish = (v) => { if (settled) return; settled = true; try { proc.kill(); } catch (e) { /* gone */ } resolve(v); };
     proc.stdout.on('data', (d) => { out += d; });
-    proc.stderr.on('data', (d) => { out += d; });
-    proc.on('error', (e) => done(`could not be started (${e.message})`));
-    proc.on('close', () => {
-      // --help exits non-zero on some builds, so look for the usage text.
-      if (/usage|--model|-m FNAME/i.test(out)) resolve('');
-      else resolve(`ran but did not look like Whisper. Output was: ${out.slice(0, 200) || '(nothing)'}`);
+    proc.stderr.on('data', (d) => { out += d; });   // whisper prints its usage to stderr
+    proc.on('error', (e) => finish({ ok: false, why: `could not be started (${e.message})` }));
+    proc.on('close', (code) => {
+      if (/usage|--model|-m FNAME/i.test(out)) { finish({ ok: true }); return; }
+      const known = WIN_START_FAILURES[code >>> 0] || WIN_START_FAILURES[code];
+      if (known) { finish({ ok: false, why: `did not start — ${known} (exit code ${code})`, startFailure: true }); return; }
+      finish({
+        ok: false,
+        why: `ran but produced no recognisable output (exit code ${code}${out ? ', output: ' + out.slice(0, 200) : ', no output at all'})`,
+        startFailure: !out,
+      });
     });
-    setTimeout(() => done('did not respond'), 20000);
+    setTimeout(() => finish({ ok: false, why: 'did not respond within 20 seconds' }), 20000);
   });
+
+  // Some builds want -h rather than --help, so a silent --help is not conclusive.
+  return attempt('--help').then(r => r.ok ? r : attempt('-h').then(r2 => r2.ok ? r2 : r));
 }
 
 class SetupModal extends Modal {
@@ -1546,6 +1573,11 @@ class SetupModal extends Modal {
     const found = findBinary(WHISPER_NAMES);
     if (found) { s.whisperPath = found; return; }
 
+    if (missingMsvcRuntime()) {
+      throw new Error('Before Whisper can be installed, this computer needs the Microsoft Visual C++ runtime. ' +
+        'Install "Microsoft Visual C++ Redistributable (x64)" from https://aka.ms/vs/17/release/vc_redist.x64.exe, ' +
+        'restart Obsidian, then press Install again.');
+    }
     const key = `${process.platform}-${process.arch}`;
     const asset = WHISPER_ASSETS[key];
     if (!asset) {
@@ -1611,10 +1643,16 @@ class SetupModal extends Modal {
     if (!IS_WIN) { try { fs.chmodSync(bin, 0o755); } catch (e) { /* best effort */ } }
 
     this.say('Checking the download works…', 100);
-    const bad = await verifyWhisper(bin);
-    if (bad) {
-      throw new Error(`Whisper downloaded but ${bad}` +
-        (IS_WIN ? ' On Windows this is usually a missing Visual C++ runtime — install "Microsoft Visual C++ Redistributable (x64)" and press Install again.' : ''));
+    const check = await verifyWhisper(bin);
+    if (!check.ok) {
+      let msg = `Whisper downloaded and unpacked, but the program ${check.why}.`;
+      if (IS_WIN && check.startFailure) {
+        msg += missingMsvcRuntime()
+          ? ' This computer is missing the Microsoft Visual C++ runtime, which that program needs. Install "Microsoft Visual C++ Redistributable (x64)" from https://aka.ms/vs/17/release/vc_redist.x64.exe, restart Obsidian, then press Install again.'
+          : ' The Visual C++ runtime looks present, so the likely cause is antivirus or Windows blocking a newly downloaded program.' +
+            ` Try running it once by hand — open ${path.dirname(bin)} and double-click ${path.basename(bin)} — and allow it if Windows asks.`;
+      }
+      throw new Error(msg);
     }
     s.whisperPath = bin;
   }

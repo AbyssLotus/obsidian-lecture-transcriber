@@ -39,21 +39,63 @@ console.log('\n--- rejects things that are not a zip ---');
   fs.rmSync(d,{recursive:true});
 }
 
-console.log('\n--- round trip on a zip we build ---');
+console.log('\n--- round trip on a zip built here, so this runs anywhere ---');
 {
-  const d=fs.mkdtempSync(path.join(os.tmpdir(),'r-'));
-  const srcDir=path.join(d,'src'); fs.mkdirSync(path.join(srcDir,'sub'),{recursive:true});
-  const big='x'.repeat(50000);           // compressible -> deflate
-  fs.writeFileSync(path.join(srcDir,'a.txt'),big);
-  fs.writeFileSync(path.join(srcDir,'sub','b.bin'),crypto.randomBytes(3000)); // incompressible -> may be stored
-  const zip=path.join(d,'out.zip');
-  cp.spawnSync('zip',['-r',zip,'.'],{cwd:srcDir,stdio:'ignore'});
-  if (!fs.existsSync(zip)) { console.log('  SKIP  (no zip command)'); }
-  else {
-    const outDir=path.join(d,'out'); unzip(zip,outDir);
-    ok('deflated file restored exactly', fs.readFileSync(path.join(outDir,'a.txt'),'utf8')===big);
-    ok('nested binary restored exactly', h(path.join(outDir,'sub','b.bin'))===h(path.join(srcDir,'sub','b.bin')));
-  }
+  const zlib=require('zlib');
+  // Minimal zip writer: enough to exercise both stored and deflated entries
+  // without depending on a `zip` command existing on the runner.
+  const makeZip=(entries)=>{
+    const locals=[], central=[]; let off=0;
+    for (const e of entries) {
+      const name=Buffer.from(e.name,'utf8');
+      const deflated=zlib.deflateRawSync(e.data);
+      const useDeflate=deflated.length < e.data.length;
+      const body=useDeflate?deflated:e.data;
+      const method=useDeflate?8:0;
+      const crc=zlib.crc32?zlib.crc32(e.data):0;
+      const lh=Buffer.alloc(30);
+      lh.writeUInt32LE(0x04034b50,0); lh.writeUInt16LE(20,4); lh.writeUInt16LE(0,6);
+      lh.writeUInt16LE(method,8); lh.writeUInt32LE(crc,14);
+      lh.writeUInt32LE(body.length,18); lh.writeUInt32LE(e.data.length,22);
+      lh.writeUInt16LE(name.length,26); lh.writeUInt16LE(0,28);
+      locals.push(lh,name,body);
+      const ch=Buffer.alloc(46);
+      ch.writeUInt32LE(0x02014b50,0); ch.writeUInt16LE(20,4); ch.writeUInt16LE(20,6);
+      ch.writeUInt16LE(method,10); ch.writeUInt32LE(crc,16);
+      ch.writeUInt32LE(body.length,20); ch.writeUInt32LE(e.data.length,24);
+      ch.writeUInt16LE(name.length,28); ch.writeUInt32LE(off,42);
+      central.push(ch,name);
+      off += lh.length+name.length+body.length;
+    }
+    const cd=Buffer.concat(central);
+    const eocd=Buffer.alloc(22);
+    eocd.writeUInt32LE(0x06054b50,0);
+    eocd.writeUInt16LE(entries.length,8); eocd.writeUInt16LE(entries.length,10);
+    eocd.writeUInt32LE(cd.length,12); eocd.writeUInt32LE(off,16);
+    return Buffer.concat([...locals,cd,eocd]);
+  };
+
+  const d=fs.mkdtempSync(path.join(os.tmpdir(),'rt-'));
+  const text=Buffer.from('x'.repeat(50000));                 // compresses -> deflate
+  const bin=crypto.randomBytes(3000);                        // does not -> stored
+  const zip=path.join(d,'built.zip');
+  fs.writeFileSync(zip, makeZip([
+    {name:'a.txt',data:text},
+    {name:'nested/deep/b.bin',data:bin},
+  ]));
+
+  const out=path.join(d,'out');
+  unzip(zip,out);
+  ok('deflated entry restored byte-for-byte', fs.readFileSync(path.join(out,'a.txt')).equals(text));
+  ok('stored entry restored byte-for-byte', fs.readFileSync(path.join(out,'nested','deep','b.bin')).equals(bin));
+  ok('created nested directories', fs.existsSync(path.join(out,'nested','deep')));
+
+  // path traversal must not escape the destination
+  const evil=path.join(d,'evil.zip');
+  fs.writeFileSync(evil, makeZip([{name:'../escaped.txt',data:Buffer.from('nope')}]));
+  const out2=path.join(d,'out2');
+  unzip(evil,out2);
+  ok('refuses to write outside the destination', !fs.existsSync(path.join(d,'escaped.txt')));
   fs.rmSync(d,{recursive:true});
 }
 
