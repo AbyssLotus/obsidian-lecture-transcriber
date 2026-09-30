@@ -493,6 +493,14 @@ module.exports = class LectureTranscriber extends Plugin {
    * ---------------------------------------------------------------------*/
   static SAMPLE_RATE = 16000;
 
+  /* Aim for physical cores — hyperthreads add little to this workload — but
+   * never fewer than whisper's own default of 4, or a 4-thread laptop would
+   * end up slower than if we had passed nothing at all. */
+  static threadCount() {
+    const logical = ((os.cpus && os.cpus()) || []).length || 4;
+    return Math.min(logical, Math.max(4, Math.floor(logical / 2)));
+  }
+
   webAudioAvailable() {
     return typeof window !== 'undefined' &&
            typeof (window.OfflineAudioContext || window.webkitOfflineAudioContext) === 'function';
@@ -651,7 +659,11 @@ module.exports = class LectureTranscriber extends Plugin {
       // audio this was ~1.5x faster with no loss on the accuracy anchors and
       // no change in loop behaviour.
       if (s.fastDecode) wargs.push('-bs', '1', '-bo', '1');
-      if (s.threads > 0) wargs.push('-t', String(s.threads));
+      // whisper defaults to 4 threads. On the CPU-only Windows and Linux builds
+      // that leaves most of a modern laptop idle, and transcription is entirely
+      // CPU-bound there. Roughly physical cores: hyperthreads do not help.
+      const threads = s.threads > 0 ? s.threads : LectureTranscriber.threadCount();
+      wargs.push('-t', String(threads));
 
       await this.run(s.whisperPath, wargs, (chunk) => {
         const m = /progress\s*=\s*(\d+)%/.exec(chunk);
@@ -1697,6 +1709,7 @@ class RunnerModal extends Modal {
     this.plugin = plugin;
     this.preset = preset || null;
     this.rows = new Map();
+    this.tickers = [];
   }
 
   async onOpen() {
@@ -1752,7 +1765,12 @@ class RunnerModal extends Modal {
     }
 
     this.bar = contentEl.createDiv({ cls: 'lt-bar' }).createDiv({ cls: 'lt-bar-fill' });
-    this.summary = contentEl.createDiv({ cls: 'lt-summary', text: 'Runs locally. A one-hour lecture takes a couple of minutes.' });
+    this.summary = contentEl.createDiv({
+      cls: 'lt-summary',
+      text: IS_MAC
+        ? 'Runs locally. A one-hour lecture takes a couple of minutes.'
+        : 'Runs locally on the processor, with no graphics acceleration, so this is slow: expect roughly ten to thirty minutes per hour of audio. The elapsed time next to each recording shows it is still working.',
+    });
 
     const buttons = contentEl.createDiv({ cls: 'lt-buttons' });
     this.cancelBtn = buttons.createEl('button', { text: 'Cancel' });
@@ -1782,10 +1800,33 @@ class RunnerModal extends Modal {
       row.addClass('is-active');
       state.setText('starting…');
 
+      // Whisper's first progress report only arrives once a chunk completes,
+      // which on a slow machine is minutes in. Without an elapsed clock the
+      // row sits at "0%" and looks frozen.
+      const startedAt = Date.now();
+      let phaseText = 'starting…';
+      let lastPct = 0;
+      const clock = () => {
+        const secs = Math.floor((Date.now() - startedAt) / 1000);
+        const mmss = `${Math.floor(secs / 60)}m ${String(secs % 60).padStart(2, '0')}s`;
+        let eta = '';
+        if (lastPct >= 5) {
+          const total = (secs / lastPct) * 100;
+          const left = Math.max(0, Math.round((total - secs) / 60));
+          eta = left > 0 ? `, about ${left}m left` : ', nearly done';
+        }
+        state.setText(`${phaseText} — ${mmss}${eta}`);
+      };
+      const ticker = window.setInterval(clock, 1000);
+      this.tickers.push(ticker);
+
       try {
         const r = await this.plugin.transcribeOne(f, (phase, pct) => {
-          state.setText(phase === 'transcribing' ? `${pct}%` : phase);
+          if (phase === 'transcribing') { lastPct = pct || 0; phaseText = `transcribing ${lastPct}%`; }
+          else phaseText = phase;
+          clock();
         });
+        window.clearInterval(ticker);
         row.removeClass('is-active'); row.addClass('is-done');
         if (r.suspect) {
           row.addClass('is-failed');
@@ -1798,6 +1839,7 @@ class RunnerModal extends Modal {
         totalWords += r.words;
         done++;
       } catch (e) {
+        window.clearInterval(ticker);
         row.removeClass('is-active');
         if (e instanceof Cancelled) { state.setText('cancelled'); break; }
         row.addClass('is-failed');
@@ -1825,7 +1867,11 @@ class RunnerModal extends Modal {
     if (done) new Notice(`Transcribed ${done} recording(s).`);
   }
 
-  onClose() { this.contentEl.empty(); }
+  onClose() {
+    for (const t of this.tickers) window.clearInterval(t);
+    this.tickers = [];
+    this.contentEl.empty();
+  }
 }
 
 /* ---------- settings ------------------------------------------------------*/

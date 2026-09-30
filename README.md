@@ -99,6 +99,14 @@ Windows setup failure.
 Open the folder the error names, double-click `whisper-cli.exe` once, and allow
 it if Windows asks. Then press Install again.
 
+**It sits at 0% for a long time** — on Windows and Linux there is no graphics
+acceleration available, so transcription runs entirely on the processor and is
+genuinely slow: roughly ten to thirty minutes per hour of audio on a laptop.
+Whisper also reports nothing until the first chunk finishes, so 0% is normal at
+the start. The elapsed clock beside each recording confirms it is still working,
+and an estimate of the time remaining appears once it passes 5%. To make it
+faster, pick a smaller model under **Summary and key points → Whisper model**.
+
 **Everything is slow** — Settings → **Summary model**: pick a smaller one.
 `qwen3:4b` is several times faster than a large model.
 
