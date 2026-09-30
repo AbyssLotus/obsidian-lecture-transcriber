@@ -2,7 +2,7 @@ const fs=require('fs'),path=require('path'),os=require('os');
 let pass=0,fail=0; const ok=(n,c,x='')=>{c?(pass++,console.log(`  PASS  ${n}`)):(fail++,console.log(`  FAIL  ${n} ${x}`));};
 
 // verifyWhisper is module-level; pull it out with its helpers.
-const code=fs.readFileSync(path.join(__dirname,'..','src','main.js'),'utf8');
+const code=fs.readFileSync(path.join(__dirname,'..','src','main.js'),'utf8').replace(/\r\n/g,'\n');
 const start=code.indexOf('const WIN_START_FAILURES');
 const end=code.indexOf('\n}\n', code.indexOf("return attempt('--help')"))+3;
 const mk=(platform)=>new Function('fs','path','spawn','IS_WIN','process',

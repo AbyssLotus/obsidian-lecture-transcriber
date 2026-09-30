@@ -74,7 +74,7 @@ console.log('\n--- default model matches the compute available ---');
   // The prebuilt Windows/Linux whisper builds are CPU-only, where the accurate
   // model is several times slower, so the default there must be the fast one.
   const fs2=require('fs');
-  const code=fs2.readFileSync(require('path').join(__dirname,'..','src','main.js'),'utf8');
+  const code=fs2.readFileSync(require('path').join(__dirname,'..','src','main.js'),'utf8').replace(/\r\n/g,'\n');
   const line=code.split('\n').find(l=>l.includes("modelPath: path.join(MODEL_DIR"));
   ok('the default is chosen per platform, not hardcoded', /IS_MAC \?/.test(line), line&&line.trim());
 

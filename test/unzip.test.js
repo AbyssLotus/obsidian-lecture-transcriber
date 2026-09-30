@@ -2,7 +2,7 @@ const fs=require('fs'),path=require('path'),os=require('os'),cp=require('child_p
 let pass=0,fail=0; const ok=(n,c,x='')=>{c?(pass++,console.log(`  PASS  ${n}`)):(fail++,console.log(`  FAIL  ${n} ${x}`));};
 
 // pull the extractor out of main.js (module-level, not exported)
-const code=fs.readFileSync(path.join(__dirname,'..','src','main.js'),'utf8');
+const code=fs.readFileSync(path.join(__dirname,'..','src','main.js'),'utf8').replace(/\r\n/g,'\n');
 const i=code.indexOf('function unzip(');
 const j=code.indexOf("\n}\n", code.indexOf('if (!written)'))+3;
 const unzip=new Function('fs','path','zlib',code.slice(i,j)+'; return unzip;')(fs,path,require('zlib'));
