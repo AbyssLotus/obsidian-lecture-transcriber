@@ -94,6 +94,8 @@ const DEFAULTS = {
   threads: 0,
   headingLabel: 'Transcript',
   setupDismissed: false,
+  studyNotesFolder: '',        // blank: alongside the lectures
+  studyUseOwnKnowledge: true,  // may explain and define beyond the transcript
 };
 
 const marker = (name) => `<!-- transcribed: ${name} -->`;
@@ -195,6 +197,12 @@ module.exports = class LectureTranscriber extends Plugin {
     // file syncing in from another device). Only after the initial index scan,
     // so opening the vault does not kick off a full re-run.
     this.addCommand({
+      id: 'study-notes',
+      name: 'Generate study notes from lectures',
+      callback: () => new StudyNotesModal(this.app, this).open(),
+    });
+
+    this.addCommand({
       id: 'run-setup',
       name: 'Set up (download Whisper and the model)',
       callback: () => new SetupModal(this.app, this).open(),
@@ -230,6 +238,172 @@ module.exports = class LectureTranscriber extends Plugin {
   }
 
   async saveSettings() { await this.saveData(this.settings); }
+
+  /* ---------- study notes ------------------------------------------------ */
+
+  // Lecture notes that actually contain a transcript, newest first.
+  transcribedNotes() {
+    return this.app.vault.getMarkdownFiles()
+      .map(f => ({ file: f, date: noteDate(f) }))
+      .filter(x => {
+        const c = this.app.metadataCache.getCache(x.file.path);
+        return !!c;   // cheap pre-filter; the real check reads the file
+      });
+  }
+
+  async notesWithTranscripts(folderPath) {
+    const out = [];
+    for (const f of this.app.vault.getMarkdownFiles()) {
+      const dir = f.parent && f.parent.path !== '/' ? f.parent.path : '';
+      if (folderPath !== null && dir !== folderPath) continue;
+      const content = await this.app.vault.cachedRead(f);
+      if (!content.includes('<!-- transcribed:')) continue;
+      const parts = transcriptsIn(content);
+      if (!parts.length) continue;
+      const words = parts.reduce((n, p) => n + p.text.split(/\s+/).length, 0);
+      out.push({ file: f, date: noteDate(f), words, parts });
+    }
+    out.sort((a, b) => a.date - b.date);
+    return out;
+  }
+
+  foldersWithTranscripts(all) {
+    const set = new Set();
+    for (const n of all) set.add(n.file.parent && n.file.parent.path !== '/' ? n.file.parent.path : '');
+    return Array.from(set).sort();
+  }
+
+  /* Writes one set of notes covering several lectures. Separate from the
+   * per-lecture summary: this is meant to be read instead of the transcripts,
+   * so it explains the material rather than recapping the session. */
+  async buildStudyNotes(notes, onProgress) {
+    const own = this.settings.studyUseOwnKnowledge;
+    const SYSTEM =
+      'You write study notes for a student from transcripts of their lectures. ' +
+      'The transcripts are raw speech-to-text and contain filler, false starts and errors; ' +
+      'infer what was meant. Write plainly and concisely, for someone revising. ' +
+      (own
+        ? 'You may use your own knowledge of the subject to explain ideas properly and to give ' +
+          'standard definitions the lecturer skipped or garbled. You must NOT invent course-specific ' +
+          'facts: no dates, deadlines, assignments, grading, or claims about what will be examined ' +
+          'unless the transcript says so.'
+        : 'Use only what the transcripts contain. Do not add outside knowledge.') +
+      (this.settings.mathNotation
+        ? ' Write all mathematics as LaTeX for Obsidian, inline between single dollar signs and displayed between double dollar signs.'
+        : '');
+
+    // Each lecture is condensed first, so the final pass sees the whole stretch
+    // of the course at once however long it was.
+    const digests = [];
+    for (let i = 0; i < notes.length; i++) {
+      if (this.cancelRequested) throw new Cancelled();
+      onProgress && onProgress(`reading lecture ${i + 1} of ${notes.length}`, 0);
+      const text = notes[i].parts.map(p => p.text).join('\n\n');
+      const chunks = this.chunkWords(text, this.maxWordsPerCall(), 120);
+      const pieces = [];
+      for (const c of chunks) {
+        pieces.push(await this.ollamaGenerate(
+          'From this part of a lecture transcript, list the material that was taught: ideas, ' +
+          'definitions, methods, worked examples. Concise bullets, no preamble, no filler.\n\n' + c,
+          SYSTEM));
+      }
+      digests.push(`## ${notes[i].file.basename} (${ymd(notes[i].date)})\n${pieces.join('\n')}`);
+    }
+
+    if (this.cancelRequested) throw new Cancelled();
+    onProgress && onProgress('writing the notes', 0);
+    const raw = await this.ollamaGenerate(
+      `Below is the taught material from ${notes.length} lecture(s) of one course, in order.\n\n` +
+      'Write one set of study notes covering all of it. Respond in EXACTLY this format, no preamble:\n\n' +
+      'TITLE: <short specific title naming the topics, no dates>\n' +
+      'OVERVIEW:\n<4 to 6 sentences explaining what this material is about, so someone who missed ' +
+      'the lectures would understand the topic>\n' +
+      'CONCEPTS:\n- <name of the idea> — <a concise explanation that actually teaches it>\n' +
+      '- <6 to 12 of these, ordered as the course taught them>\n' +
+      'VOCABULARY:\n- <term> — <one-sentence definition>\n' +
+      '- <8 to 20 of these, every term a student would need to know>\n\n' +
+      'MATERIAL:\n' + digests.join('\n\n'),
+      SYSTEM);
+
+    const parsed = this.parseStudyNotes(raw);
+    if (!parsed.overview && !parsed.concepts.length) {
+      throw new Error('The model did not return usable study notes');
+    }
+    return parsed;
+  }
+
+  parseStudyNotes(raw) {
+    const clean = String(raw || '').replace(/<think>[\s\S]*?<\/think>/gi, '');
+    let title = '', mode = null;
+    const overview = [], concepts = [], vocab = [];
+    for (const line of clean.split('\n')) {
+      const t = line.trim();
+      let m;
+      if ((m = t.match(/^#*\s*TITLE\s*[:\-]\s*(.*)$/i))) { title = m[1]; mode = null; continue; }
+      if (/^#*\s*OVERVIEW\s*[:\-]?\s*$/i.test(t)) { mode = 'o'; continue; }
+      if ((m = t.match(/^#*\s*OVERVIEW\s*[:\-]\s*(.+)$/i))) { mode = 'o'; overview.push(m[1]); continue; }
+      if (/^#*\s*CONCEPTS?\s*[:\-]?\s*$/i.test(t)) { mode = 'c'; continue; }
+      if (/^#*\s*VOCAB(?:ULARY)?\s*[:\-]?\s*$/i.test(t)) { mode = 'v'; continue; }
+      if (!t) continue;
+      const item = t.replace(/^[-*\u2022]\s?/, '').replace(/^\d+[.)]\s?/, '').trim();
+      if (mode === 'o') overview.push(t);
+      else if (mode === 'c' && item.length > 2) concepts.push(item);
+      else if (mode === 'v' && item.length > 2) vocab.push(item);
+    }
+    const split = (x) => {
+      const m = x.match(/^(.{1,80}?)\s+(?:—|–|--|:)\s+(.+)$/);
+      return m ? { term: m[1].replace(/\*\*/g, '').trim(), meaning: m[2].trim() } : { term: '', meaning: x };
+    };
+    const fix = (x) => this.settings.mathNotation ? this.normalizeMath(x, true) : x;
+    return {
+      title: title.replace(/^["'#\s]+|["'\s]+$/g, '').trim(),
+      overview: fix(overview.join(' ').trim()),
+      concepts: concepts.map(c => { const s2 = split(fix(c)); return s2; }),
+      vocab: vocab.map(v => split(fix(v))).filter(v => v.term),
+    };
+  }
+
+  async writeStudyNotes(notes, digest, label) {
+    const folder = this.settings.studyNotesFolder.trim() ||
+      (notes[0].file.parent && notes[0].file.parent.path !== '/' ? notes[0].file.parent.path : '');
+    const safeLabel = label.replace(/[\\/:*?"<>|]/g, '-');
+    let base = `Study notes — ${safeLabel}`;
+    let target = normalizePath(folder ? `${folder}/${base}.md` : `${base}.md`);
+    let n = 2;
+    while (this.app.vault.getAbstractFileByPath(target)) {
+      target = normalizePath(folder ? `${folder}/${base} (${n}).md` : `${base} (${n}).md`);
+      n++;
+    }
+
+    const stamp = window.moment ? window.moment().format('YYYY-MM-DD') : ymd(new Date());
+    const lines = [
+      `# ${digest.title || base}`,
+      '',
+      `*Study notes written ${stamp} from ${notes.length} lecture${notes.length === 1 ? '' : 's'}.*`,
+      '',
+    ];
+    if (digest.overview) lines.push('## Overview', '', digest.overview, '');
+    if (digest.concepts.length) {
+      lines.push('## Key concepts', '');
+      for (const c of digest.concepts) {
+        lines.push(c.term ? `- **${c.term}** — ${c.meaning}` : `- ${c.meaning}`);
+      }
+      lines.push('');
+    }
+    if (digest.vocab.length) {
+      lines.push('## Vocabulary', '', '| Term | Meaning |', '| --- | --- |');
+      for (const v of digest.vocab) {
+        lines.push(`| ${v.term.replace(/\|/g, '\\|')} | ${v.meaning.replace(/\|/g, '\\|')} |`);
+      }
+      lines.push('');
+    }
+    lines.push('## Lectures these came from', '');
+    for (const nt of notes) lines.push(`- [[${nt.file.basename}]] — ${ymd(nt.date)}`);
+    lines.push('');
+
+    await this.app.vault.create(target, lines.join('\n'));
+    return target;
+  }
 
   /* ---------- keep the Mac awake -----------------------------------------
    * One assertion held for the whole run, not per file, so the machine does
@@ -1244,6 +1418,216 @@ module.exports = class LectureTranscriber extends Plugin {
   }
 };
 
+/* ---------- study notes -------------------------------------------------
+ * A deliberately manual feature, separate from transcription: take the
+ * transcripts of several lectures and write one concise set of notes that
+ * explains the topic and defines its vocabulary. Never runs on its own.
+ * ---------------------------------------------------------------------*/
+
+// Lecture notes are named by hand and inconsistently ("9.22.26", "9.25.2026"),
+// and file timestamps lie once a note has been edited, so prefer a date parsed
+// out of the name and fall back to the file's own time.
+function noteDate(file) {
+  const name = file.basename || '';
+  let m = name.match(/\b(20\d{2})[.\-/](\d{1,2})[.\-/](\d{1,2})\b/);
+  if (m) {
+    const d = new Date(+m[1], +m[2] - 1, +m[3]);
+    if (!isNaN(d)) return d;
+  }
+  m = name.match(/\b(\d{1,2})[.\-/](\d{1,2})[.\-/](\d{2,4})\b/);
+  if (m) {
+    let year = +m[3];
+    if (year < 100) year += 2000;
+    const d = new Date(year, +m[1] - 1, +m[2]);
+    if (!isNaN(d) && d.getFullYear() > 2000 && d.getFullYear() < 2100) return d;
+  }
+  const t = (file.stat && (file.stat.ctime || file.stat.mtime)) || 0;
+  return t ? new Date(t) : new Date(0);
+}
+
+function ymd(d) {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
+// Pull just the transcript bodies out of a lecture note, dropping the headings,
+// the summary, and the marker comments.
+function transcriptsIn(content) {
+  const out = [];
+  const re = /<!-- transcribed: (.*?) -->([\s\S]*?)(?=\n<!-- transcribed: |$)/g;
+  let m;
+  while ((m = re.exec(content))) {
+    let body = m[2];
+    const idx = body.indexOf('### Transcript');
+    if (idx >= 0) body = body.slice(idx + '### Transcript'.length);
+    else body = body.replace(/^##[^\n]*\n/gm, '').replace(/^\*Transcribed[^\n]*\n/gm, '');
+    body = body.replace(/^>\s?\[!\w+\][^\n]*\n(?:>[^\n]*\n)*/gm, '')   // callouts
+               .replace(/^### [^\n]*\n/gm, '')
+               .trim();
+    if (body.split(/\s+/).length > 40) out.push({ audio: m[1], text: body });
+  }
+  return out;
+}
+
+/* The picker. Nothing here happens on a timer or on a file appearing; it only
+ * runs when the command is invoked and the button pressed. */
+class StudyNotesModal extends Modal {
+  constructor(app, plugin) {
+    super(app);
+    this.plugin = plugin;
+    this.all = [];
+    this.folder = null;
+    this.selected = new Set();
+    this.busy = false;
+  }
+
+  async onOpen() {
+    this.titleEl.setText('Generate study notes');
+    this.contentEl.createEl('p', { text: 'Loading lectures…', cls: 'lt-summary' });
+    this.all = await this.plugin.notesWithTranscripts(null);
+    if (!this.all.length) {
+      this.contentEl.empty();
+      this.contentEl.createEl('p', { text: 'No transcribed lectures found yet. Transcribe some recordings first.' });
+      return;
+    }
+    const folders = this.plugin.foldersWithTranscripts(this.all);
+    this.folder = folders.includes(this.lastFolder) ? this.lastFolder : folders[0];
+    this.render(folders);
+  }
+
+  inFolder() {
+    return this.all.filter(n => {
+      const dir = n.file.parent && n.file.parent.path !== '/' ? n.file.parent.path : '';
+      return dir === this.folder;
+    });
+  }
+
+  applyPreset(days) {
+    const list = this.inFolder();
+    this.selected = new Set();
+    if (days === null) { list.forEach(n => this.selected.add(n.file.path)); return; }
+    const cutoff = Date.now() - days * 86400000;
+    list.forEach(n => { if (n.date.getTime() >= cutoff) this.selected.add(n.file.path); });
+  }
+
+  render(folders) {
+    const c = this.contentEl;
+    c.empty();
+
+    c.createEl('p', {
+      cls: 'lt-summary',
+      text: 'Writes one set of notes covering the lectures you pick: an overview that explains the topic, the key concepts, and a vocabulary list. This only runs when you press the button.',
+    });
+
+    new Setting(c)
+      .setName('Course folder')
+      .addDropdown(dd => {
+        for (const f of folders) dd.addOption(f, f || '(vault root)');
+        dd.setValue(this.folder).onChange(v => {
+          this.folder = v; this.lastFolder = v;
+          this.applyPreset(7);
+          this.render(folders);
+        });
+      });
+
+    const presets = c.createDiv({ cls: 'lt-buttons' });
+    const preset = (label, days) => {
+      presets.createEl('button', { text: label }).onclick = () => { this.applyPreset(days); this.render(folders); };
+    };
+    preset('Today', 1);
+    preset('This week', 7);
+    preset('Last two weeks', 14);
+    preset('Everything', null);
+
+    const list = this.inFolder();
+    if (!this.selected.size) this.applyPreset(7);
+
+    const box = c.createDiv({ cls: 'lt-modal-list' });
+    for (const n of list) {
+      const row = box.createDiv({ cls: 'lt-row' });
+      const cb = row.createEl('input');
+      cb.type = 'checkbox';
+      cb.checked = this.selected.has(n.file.path);
+      cb.onchange = () => {
+        if (cb.checked) this.selected.add(n.file.path); else this.selected.delete(n.file.path);
+        this.updateCount();
+      };
+      row.createDiv({ cls: 'lt-row-name', text: n.file.basename });
+      row.createDiv({ cls: 'lt-row-state', text: `${ymd(n.date)} · ${n.words.toLocaleString()} words` });
+    }
+
+    this.progress = c.createDiv({ cls: 'lt-bar' }).createDiv({ cls: 'lt-bar-fill' });
+    this.msg = c.createDiv({ cls: 'lt-summary', text: '' });
+    this.updateCount();
+
+    const buttons = c.createDiv({ cls: 'lt-buttons' });
+    buttons.createEl('button', { text: 'Close' }).onclick = () => this.close();
+    this.go = buttons.createEl('button', { text: 'Write study notes', cls: 'mod-cta' });
+    this.go.onclick = () => this.run();
+  }
+
+  chosen() {
+    return this.inFolder().filter(n => this.selected.has(n.file.path));
+  }
+
+  updateCount() {
+    const picked = this.chosen();
+    const words = picked.reduce((n, x) => n + x.words, 0);
+    this.msg.setText(picked.length
+      ? `${picked.length} lecture${picked.length === 1 ? '' : 's'} selected, ${words.toLocaleString()} words.`
+      : 'Nothing selected.');
+    if (this.go) this.go.disabled = !picked.length;
+  }
+
+  label(picked) {
+    const first = ymd(picked[0].date), last = ymd(picked[picked.length - 1].date);
+    const folder = (this.folder || 'vault').split('/').pop();
+    return picked.length === 1 || first === last ? `${folder} ${first}` : `${folder} ${first} to ${last}`;
+  }
+
+  async run() {
+    const picked = this.chosen();
+    if (!picked.length || this.busy) return;
+    if (!(await this.plugin.ollamaVersion())) {
+      this.msg.setText('Ollama is not running, and these notes are written by it. Start Ollama and try again.');
+      return;
+    }
+    this.busy = true;
+    this.go.disabled = true;
+    this.go.setText('Working…');
+    this.plugin.cancelRequested = false;
+    this.plugin.acquireAwake('transcribing');
+    const started = Date.now();
+    const tick = window.setInterval(() => {
+      const s2 = Math.floor((Date.now() - started) / 1000);
+      this.msg.setText(`${this.phase || 'working'} — ${Math.floor(s2 / 60)}m ${String(s2 % 60).padStart(2, '0')}s`);
+    }, 1000);
+
+    try {
+      const digest = await this.plugin.buildStudyNotes(picked, (phase, pct) => {
+        this.phase = phase;
+        if (this.progress) this.progress.style.setProperty('--lt-progress', `${Math.round(pct || 0)}%`);
+      });
+      const target = await this.plugin.writeStudyNotes(picked, digest, this.label(picked));
+      window.clearInterval(tick);
+      this.msg.setText(`Written to ${target}`);
+      new Notice(`Study notes written to ${target}`);
+      const f = this.app.vault.getAbstractFileByPath(target);
+      if (f) this.app.workspace.getLeaf(true).openFile(f);
+      this.close();
+    } catch (e) {
+      window.clearInterval(tick);
+      this.msg.setText(e instanceof Cancelled ? 'Cancelled.' : `Could not finish: ${e.message}`);
+      this.go.disabled = false;
+      this.go.setText('Try again');
+    } finally {
+      this.plugin.releaseAwake('transcribing');
+      this.busy = false;
+    }
+  }
+
+  onClose() { this.contentEl.empty(); }
+}
+
 /* ---------- setup: fetch what is missing ----------------------------------
  * The plugin needs a Whisper program and a model. Rather than making people
  * find and install those themselves, this downloads the right build for the
@@ -1899,6 +2283,27 @@ class TranscriberSettingTab extends PluginSettingTab {
       .addButton(b => b.setButtonText('Transcribe all').setCta().onClick(() => {
         this.plugin.openRunner();
       }));
+
+    new Setting(containerEl)
+      .setName('Study notes')
+      .setDesc('Takes the transcripts of several lectures and writes one set of notes that explains the topic and defines its vocabulary. Runs only when you ask it to.')
+      .addButton(b => b.setButtonText('Write study notes').onClick(() => {
+        new StudyNotesModal(this.app, this.plugin).open();
+      }));
+
+    new Setting(containerEl)
+      .setName('Study notes may explain beyond the transcript')
+      .setDesc('Lets the model use its own knowledge of the subject to explain ideas properly and define terms the lecturer skipped. It is still forbidden from inventing course specifics such as deadlines or what is examined. Turn off to keep strictly to what was said.')
+      .addToggle(t => t.setValue(this.plugin.settings.studyUseOwnKnowledge).onChange(async v => {
+        this.plugin.settings.studyUseOwnKnowledge = v; await this.plugin.saveSettings();
+      }));
+
+    new Setting(containerEl)
+      .setName('Where to put study notes')
+      .setDesc('Leave empty to put them in the same folder as the lectures.')
+      .addText(t => t.setPlaceholder('e.g. Study notes')
+        .setValue(this.plugin.settings.studyNotesFolder)
+        .onChange(async v => { this.plugin.settings.studyNotesFolder = v.trim(); await this.plugin.saveSettings(); }));
 
     new Setting(containerEl).setName('Behaviour').setHeading();
 

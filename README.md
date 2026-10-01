@@ -78,6 +78,38 @@ Your computer is kept awake for the whole thing, including while recording.
 
 ---
 
+## Study notes from several lectures
+
+Separate from everything above, and **it never runs on its own** — only when you
+ask for it.
+
+Transcripts are long and you will not reread them. This takes a set of lectures
+and writes one set of notes that actually explains the material: an overview of
+the topic, the key concepts, and a vocabulary table.
+
+**To use it:** command palette → **Generate study notes from lectures**, or
+Settings → **Study notes** → *Write study notes*.
+
+Pick the course folder, then choose which lectures to include. There are
+shortcuts for **Today**, **This week**, **Last two weeks** and **Everything**,
+and you can tick individual lectures. Dates come from the lecture note names, so
+grouping by week works even if the files were edited later.
+
+It writes a **new** note beside the lectures and never touches them. Each one
+links back to the lectures it came from.
+
+Roughly half a minute per lecture: three lectures of a calculus course, about
+15,000 words of transcript, took 80 seconds.
+
+**It is allowed to explain beyond the transcript.** The model may use its own
+knowledge of the subject to define terms properly and explain ideas the lecturer
+rushed, because a garbled definition is worse than a textbook one. It is
+forbidden from inventing course specifics — deadlines, assignments, what is on
+the exam — unless the transcript says so. You can turn this off in settings to
+keep strictly to what was said.
+
+---
+
 ## If something goes wrong
 
 **"Not set up yet"** — open Settings → *Transcriber and Summary for Idiots* →
